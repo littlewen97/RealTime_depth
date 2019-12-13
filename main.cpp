@@ -1,4 +1,8 @@
+
+#include <stdio.h>
+#include <stdlib.h>
 #include <k4a/k4a.hpp>
+#include <k4abt.h>
 
 #include <fstream>
 #include <iostream>
@@ -13,6 +17,14 @@
 #include "Pixel.h"
 #include "DepthPixelColorizer.h"
 #include "StaticImageProperties.h"
+
+
+#define VERIFY(result, error)                                                                            \
+    if(result != K4A_RESULT_SUCCEEDED)                                                                   \
+    {                                                                                                    \
+        printf("%s \n - (File: %s, Function: %s, Line: %d)\n", error, __FILE__, __FUNCTION__, __LINE__); \
+        exit(1);                                                                                         \
+    }  
 
 using namespace std;
 using namespace cv;
@@ -58,7 +70,7 @@ void onMouse(int event, int x, int y, int, void*)
 void ave_depth(unsigned long sum_depth, int width, int height) {
 	long points_num = (width + 1) * (height + 1);
 	long ave_depth = sum_depth / points_num;
-	cout << ave_depth << endl;
+	cout <<ave_depth << endl;
 }
 
 void sum_depth(Rect &select, const k4a::image& depthImage)
@@ -86,6 +98,7 @@ void sum_depth(Rect &select, const k4a::image& depthImage)
 }
 
 
+
 int main(int argc, char **argv)
 {
 	const uint32_t deviceCount = k4a::device::get_installed_count();
@@ -102,53 +115,127 @@ int main(int argc, char **argv)
 	config.synchronized_images_only = true;
 
 	cout << "Started opening K4A device..." << endl;
-	k4a::device device = k4a::device::open(K4A_DEVICE_DEFAULT);
-	device.start_cameras(&config);
+	k4a_device_t device = NULL;
+	k4a_device_open(0, &device);
+	//k4a::device device = k4a::device::open(K4A_DEVICE_DEFAULT);
+	k4a_device_start_cameras(device, &config);
+	//device.start_cameras(&config);
 	cout << "Finished opening K4A device." << endl;
+
+	//body
+	k4a_calibration_t sensorCalibration;
+	VERIFY(k4a_device_get_calibration(device, config.depth_mode, config.color_resolution, &sensorCalibration),
+		"Get depth camera calibration failed!");
+	int depthWidth = sensorCalibration.depth_camera_calibration.resolution_width;
+	int depthHeight = sensorCalibration.depth_camera_calibration.resolution_height;
+	cout << depthWidth << " " << depthHeight << endl;
+	k4abt_tracker_t tracker = nullptr;
+	k4abt_tracker_configuration_t tracker_config = K4ABT_TRACKER_CONFIG_DEFAULT;
+	tracker_config.processing_mode = K4ABT_TRACKER_PROCESSING_MODE_CPU;
+	VERIFY(k4abt_tracker_create(&sensorCalibration, tracker_config, &tracker), "Body tracker initialization failed!");
 
 	std::vector<Pixel> depthTextureBuffer;
 	//std::vector<Pixel> irTextureBuffer;
 	uint8_t *colorTextureBuffer;
 
-	k4a::capture capture;
+	k4a_capture_t capture;
 
-	k4a::image depthImage;
-	k4a::image colorImage;
+	//k4a_image_t depthImage=k4a_capture_get_depth_image(capture);
+	//k4a_image_t colorImage= k4a_capture_get_color_image(capture);
 	//k4a::image irImage;
 
 	cv::Mat depthFrame;
 	cv::Mat colorFrame;
+	cv::Mat bodyFrame;
 	//cv::Mat irFrame;
 
 	namedWindow("kinect depth map master", 1);
 	setMouseCallback("kinect depth map master", onMouse, 0);
-
+	
 	while (1)
 	{
-		if (device.get_capture(&capture, std::chrono::milliseconds(0)))
+		if (k4a_device_get_capture(device, &capture, K4A_WAIT_INFINITE)== K4A_WAIT_RESULT_SUCCEEDED)
 		{
 			{
-				depthImage = capture.get_depth_image();
-				colorImage = capture.get_color_image();
-				//irImage = capture.get_ir_image();
+				k4a_wait_result_t queueCaptureResult = k4abt_tracker_enqueue_capture(tracker, capture, 0);
+				k4abt_frame_t bodyFrame = nullptr;
+				k4a_wait_result_t popFrameResult = k4abt_tracker_pop_result(tracker, &bodyFrame, 0);
+				if(popFrameResult == K4A_WAIT_RESULT_SUCCEEDED) {
+					//cout << "popFrameResult == K4A_WAIT_RESULT_SUCCEEDED" << endl;
+					k4a_capture_t originalCapture = k4abt_frame_get_capture(bodyFrame);
+					k4a_image_t bodyIndexMap = k4abt_frame_get_body_index_map(bodyFrame);
+					const uint8_t* bodyIndexMapBuffer = k4a_image_get_buffer(bodyIndexMap);
+					for (int i = 0; i < depthWidth * depthHeight; i++)
+					{
+						uint8_t bodyIndex = bodyIndexMapBuffer[i];
+						if (bodyIndex != K4ABT_BODY_INDEX_MAP_BACKGROUND)
+						{
+							uint32_t bodyId = k4abt_frame_get_body_id(bodyFrame, bodyIndex);
+						}
+					}
+					uint32_t numBodies = k4abt_frame_get_num_bodies(bodyFrame);
+					for (uint32_t i = 0; i < numBodies; i++)
+					{
+						k4abt_body_t body;
+						k4abt_frame_get_body_skeleton(bodyFrame, i, &body.skeleton);
+						body.id = k4abt_frame_get_body_id(bodyFrame, i);
 
-				ColorizeDepthImage2(depthImage, DepthPixelColorizer::ColorizeBlueToRed, GetDepthModeRange(config.depth_mode), &depthTextureBuffer);
-				//ColorizeDepthImage(irImage, DepthPixelColorizer::ColorizeGreyscale, GetIrLevels(K4A_DEPTH_MODE_PASSIVE_IR), &irTextureBuffer);
-				colorTextureBuffer = colorImage.get_buffer();
+						for (int joint = 0; joint < static_cast<int>(K4ABT_JOINT_COUNT); joint++)
+						{
+							if (body.skeleton.joints[joint].confidence_level >= K4ABT_JOINT_CONFIDENCE_LOW)
+							{
+								const k4a_float3_t& jointPosition = body.skeleton.joints[joint].position;
+								const k4a_quaternion_t& jointOrientation = body.skeleton.joints[joint].orientation;
+							}
+						}
 
-				depthFrame = cv::Mat(depthImage.get_height_pixels(), depthImage.get_width_pixels(), CV_8UC4, depthTextureBuffer.data());
-				colorFrame = cv::Mat(colorImage.get_height_pixels(), colorImage.get_width_pixels(), CV_8UC4, colorTextureBuffer);
-				//irFrame = cv::Mat(irImage.get_height_pixels(), irImage.get_width_pixels(), CV_8UC4, irTextureBuffer.data());
+						float SHOULDER_RIGHT_xPos = body.skeleton.joints[K4ABT_JOINT_SHOULDER_RIGHT].position.xyz.x;
+						float SHOULDER_RIGHT_yPos = body.skeleton.joints[K4ABT_JOINT_SHOULDER_RIGHT].position.xyz.y;
+						float SHOULDER_LEFT_xPos = body.skeleton.joints[K4ABT_JOINT_SHOULDER_LEFT].position.xyz.x;
+						float SHOULDER_LEFT_yPos = body.skeleton.joints[K4ABT_JOINT_SHOULDER_LEFT].position.xyz.y;
+						float SPINE_CHEST_xPos = body.skeleton.joints[K4ABT_JOINT_SPINE_CHEST].position.xyz.x;
+						float SPINE_CHEST_yPos = body.skeleton.joints[K4ABT_JOINT_SPINE_CHEST].position.xyz.y;
+
+						float width = abs(SHOULDER_RIGHT_xPos - SHOULDER_LEFT_xPos);
+						float height = abs(SHOULDER_RIGHT_yPos - SPINE_CHEST_yPos);
+
+						std::cout << "right: " << (int)SHOULDER_RIGHT_xPos << " y: " << (int)SHOULDER_RIGHT_yPos << std::endl;
+						//std::cout << "x: " << 320 + (int)SHOULDER_RIGHT_xPos <<" y: "<< 288 + (int)SHOULDER_RIGHT_yPos <<" width: "<<width<<" height: "<<height<< std::endl;
+						select.x = depthWidth/2 + (int)SHOULDER_RIGHT_xPos;
+						select.y = depthHeight/2 + (int)SHOULDER_RIGHT_yPos;
+						select.width = (int)width;
+						select.height = (int)height;
+					}
+
+					k4a_image_t depthImage = k4a_capture_get_depth_image(originalCapture);
+					//k4a_image_t depthImage = k4a_capture_get_depth_image(capture);
+					k4a_image_t colorImage = k4a_capture_get_color_image(capture);
+					//irImage = capture.get_ir_image();
+
+					ColorizeDepthImage2(depthImage, DepthPixelColorizer::ColorizeBlueToRed, GetDepthModeRange(config.depth_mode), &depthTextureBuffer);
+					//ColorizeDepthImage(irImage, DepthPixelColorizer::ColorizeGreyscale, GetIrLevels(K4A_DEPTH_MODE_PASSIVE_IR), &irTextureBuffer);
+					colorTextureBuffer = k4a_image_get_buffer(colorImage);
+
+					depthFrame = cv::Mat(k4a_image_get_height_pixels(depthImage), k4a_image_get_width_pixels(depthImage), CV_8UC4, depthTextureBuffer.data());
+					colorFrame = cv::Mat(k4a_image_get_height_pixels(colorImage), k4a_image_get_width_pixels(colorImage), CV_8UC4, colorTextureBuffer);
+					//irFrame = cv::Mat(irImage.get_height_pixels(), irImage.get_width_pixels(), CV_8UC4, irTextureBuffer.data());
 
 
-				//cal_Depth(select, depthImage);
-				//画出矩形框
-				rectangle(depthFrame, select, Scalar(0, 0, 255), 1, 8, 0);//能够实时显示在画矩形窗口时的痕迹
-				sum_depth(select,depthImage);
+					//cal_Depth(select, depthImage);
+					//画出矩形框
+					rectangle(depthFrame, select, Scalar(0, 0, 255), 1, 8, 0);//能够实时显示在画矩形窗口时的痕迹
+					//sum_depth(select,depthImage);
 
-				cv::imshow("kinect depth map master", depthFrame);
-				//cv::imshow("kinect color frame master", colorFrame);
-				//cv::imshow("kinect ir frame master", irFrame);
+					cv::imshow("kinect depth map master", depthFrame);
+					//cv::imshow("kinect color frame master", colorFrame);
+					//cv::imshow("kinect ir frame master", irFrame);
+
+
+
+				}
+				
+		
+				
 
 				
 			}
@@ -156,9 +243,16 @@ int main(int argc, char **argv)
 		}
 		if (waitKey(30) == 27 || waitKey(30) == 'q')
 		{
-			device.close();
+			
+			k4a_capture_release(capture);
+			k4a_device_close(device);
 			break;
 		}
 	}
 	return 0;
 }
+
+
+///////////////////////////////////////////////////////////////////////////////////////
+
+
