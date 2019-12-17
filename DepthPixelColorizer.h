@@ -65,20 +65,5 @@ namespace sen
 			return result;
 		}
 
-		// Computes a greyscale representation of a depth pixel.
-		//
-		static inline Pixel ColorizeGreyscale(const DepthPixel &value, const DepthPixel &min, const DepthPixel &max)
-		{
-			// Clamp to max
-			//
-			DepthPixel pixelValue = std::min(value, max);
-
-			constexpr uint8_t PixelMax = std::numeric_limits<uint8_t>::max();
-			const auto normalizedValue = static_cast<uint8_t>((pixelValue - min) * (double(PixelMax) / (max - min)));
-
-			// All color channels are set the same (image is greyscale)
-			//
-			return Pixel{ normalizedValue, normalizedValue, normalizedValue, PixelMax };
-		}
 	};
 }
